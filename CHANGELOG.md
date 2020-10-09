@@ -1,3 +1,27 @@
+##  v1.9.0 (10/12/2020)
+
+**Common**
+
+* The default logger now adds a timestamp to logs.
+* Fixed a crash in the `DefaultCache::Put` method that occurred when the input value was `null`.
+* Fixed the HTTP response error that occurred when the request was canceled during the network shutdown on Windows.
+* `TaskScheduler` now supports tasks with priorities. Tasks with higher priority are executed first.
+* Fixed the issue that occurred when JSON Parsers produced valid empty objects.
+
+**olp-cpp-sdk-dataservice-read**
+
+* Fixed the behavior of the `GetAggregatedData` and `PrefetchTiles` APIs. When the aggregated parent tile was far away, other APIs could not find it (for example, level 14 tile aggregated on level 1). Now, the aggregated tile can be found and used by other APIs.
+* `PrefetchTilesRequest`, `TileRequest`, and `DataRequest` now support priorities. Now, you can prefetch and download individual tiles simultaneously.
+* Fixed the crash that occurred when the client was destroyed during the prefetch operation.
+* Changed the behavior of `CratalogClient::GetLatestVersion` and `VersionedLayerClient`. Now, if you do not specify a version, the SDK tries to get it from the network by default. Also, in the cache, the latest version now does not expire after five minutes.
+* Added a new API that you can use to prefetch generic partitions.
+
+**olp-cpp-sdk-dataservice-write**
+
+* Fixed the uploading of encoded data to the HERE Blob Service. The missing `Content-Encoding` header is now added when the layer is configured as compressed.
+* **Work In Progress** Enhanced `olp::dataservice::write::VersionedLayerClient`. The `PublishToBatch` and `CancelBatch` methods now use `olp::thread::TaskScheduler` instead of network threads for asynchronous operations.
+* **Work In Progress** Enhanced `olp::dataservice::write::VolatileLayerClient`. The `PublishPartitionData` method now uses `olp::thread::TaskScheduler` instead of network threads for asynchronous operations.
+
 ## v1.8.0 (08/25/2020)
 
 **Common**
