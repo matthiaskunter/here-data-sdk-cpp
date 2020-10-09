@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2020 HERE Europe B.V.
+ * Copyright (C) 2020 HERE Europe B.V.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,29 +39,19 @@
 #include "ResponseGenerator.h"
 #include "VersionedLayerTestBase.h"
 
+using mockserver::ReadDefaultResponses;
+using olp::http::HttpStatusCode;
 using testing::_;
-
 namespace {
 
 namespace read = olp::dataservice::read;
 namespace client = olp::client;
 namespace http = olp::http;
 
-constexpr auto kTestLayer = "testlayer";
-constexpr auto kTestVersion = 108;
-
 constexpr auto kTimeout = std::chrono::seconds(3);
 
-class VersionedLayerClientPrefetchPartitionsTest
-    : public VersionedLayerTestBase {
+class VersionedLayerPrefetchPartitionsTest : public VersionedLayerTestBase {
  protected:
-  VersionedLayerClientPrefetchPartitionsTest()
-      : VersionedLayerTestBase(VersionedLayerTestBase::EndpointType::kLookup),
-        api_response_(ResponseGenerator::ResourceApis(kCatalog)),
-        version_(kTestVersion),
-        layer_(kTestLayer),
-        generator_(api_response_, layer_) {}
-
   std::vector<std::string> GeneratePartitionIds(size_t partitions_count) {
     std::vector<std::string> partitions;
     partitions.reserve(partitions_count);
@@ -71,73 +61,26 @@ class VersionedLayerClientPrefetchPartitionsTest
     return partitions;
   }
 
-  void SetupApiResponse(http::NetworkResponse response,
-                        const std::string& api_response) {
-    EXPECT_CALL(*network_mock_, Send(IsGetRequest(kUrlLookup), _, _, _, _))
-        .WillOnce(ReturnHttpResponse(response, api_response));
-  }
-
-  void SetupVersionResponse(http::NetworkResponse response) {
-    auto version_path = generator_.LatestVersion();
-    ASSERT_FALSE(version_path.empty());
-
-    EXPECT_CALL(*network_mock_, Send(IsGetRequest(version_path), _, _, _, _))
-        .WillOnce(
-            ReturnHttpResponse(response, ResponseGenerator::Version(version_)));
-  }
-
-  void SetupQueryPartitionsResponse(
-      http::NetworkResponse response,
-      const std::vector<std::string>& partitions,
-      const read::model::Partitions& partitions_response) {
-    auto partitions_path = generator_.PartitionsQuery(partitions, version_);
-
-    EXPECT_CALL(*network_mock_, Send(IsGetRequest(partitions_path), _, _, _, _))
-        .WillOnce(ReturnHttpResponse(
-            response, ResponseGenerator::Partitions(partitions_response)));
-  }
-
-  void SetupPertitionResponse(http::NetworkResponse response,
-                              const std::string& data_handle,
-                              const std::string& response_data) {
-    auto partition_path = generator_.DataBlob(data_handle);
-    ASSERT_FALSE(partition_path.empty());
-
-    EXPECT_CALL(*network_mock_, Send(IsGetRequest(partition_path), _, _, _, _))
-        .WillOnce(ReturnHttpResponse(response, response_data));
-  }
-
  protected:
-  std::string api_response_;
-  uint32_t version_;
-  std::string layer_;
-  PlatformUrlsGenerator generator_;
+  const std::string layer_ = "testlayer";
 };
 
-TEST_F(VersionedLayerClientPrefetchPartitionsTest, PrefetchPartitions) {
+TEST_F(VersionedLayerPrefetchPartitionsTest, PrefetchPartitions) {
   auto partitions_count = 3u;
   auto client =
       read::VersionedLayerClient(kCatalogHrn, layer_, boost::none, settings_);
   auto partitions = GeneratePartitionIds(partitions_count);
   auto partitions_response =
-      mockserver::ReadDefaultResponses::GeneratePartitionsResponse(
-          partitions_count);
+      ReadDefaultResponses::GeneratePartitionsResponse(partitions_count);
   const auto request =
       read::PrefetchPartitionsRequest().WithPartitionIds(partitions);
   {
     SCOPED_TRACE("Prefetch online");
-    SetupApiResponse(
-        http::NetworkResponse().WithStatus(http::HttpStatusCode::OK),
-        api_response_);
-    SetupVersionResponse(
-        http::NetworkResponse().WithStatus(http::HttpStatusCode::OK));
-    SetupQueryPartitionsResponse(
-        http::NetworkResponse().WithStatus(http::HttpStatusCode::OK),
-        partitions, partitions_response);
+
+    ExpectVersionRequest();
+    ExpectQueryPartitionsRequest(partitions, partitions_response);
     for (const auto& partition : partitions_response.GetPartitions()) {
-      SetupPertitionResponse(
-          http::NetworkResponse().WithStatus(http::HttpStatusCode::OK),
-          partition.GetDataHandle(), "data");
+      ExpectBlobRequest(partition.GetDataHandle(), "data");
     }
 
     auto future = client.PrefetchPartitions(request).GetFuture();
@@ -155,12 +98,11 @@ TEST_F(VersionedLayerClientPrefetchPartitionsTest, PrefetchPartitions) {
   }
   {
     SCOPED_TRACE("Prefetch cached");
-    std::promise<olp::dataservice::read::PrefetchPartitionsResponse> promise;
+    std::promise<read::PrefetchPartitionsResponse> promise;
     auto future = promise.get_future();
     auto token = client.PrefetchPartitions(
         request,
-        [&promise](
-            olp::dataservice::read::PrefetchPartitionsResponse response) {
+        [&promise](read::PrefetchPartitionsResponse response) {
           promise.set_value(std::move(response));
         },
         nullptr);
@@ -172,36 +114,20 @@ TEST_F(VersionedLayerClientPrefetchPartitionsTest, PrefetchPartitions) {
   }
 }
 
-TEST_F(VersionedLayerClientPrefetchPartitionsTest, PrefetchPartitionsFails) {
+TEST_F(VersionedLayerPrefetchPartitionsTest, PrefetchPartitionsFails) {
   auto partitions_count = 3u;
   auto client =
       read::VersionedLayerClient(kCatalogHrn, layer_, boost::none, settings_);
   auto partitions = GeneratePartitionIds(partitions_count);
   auto partitions_response =
-      mockserver::ReadDefaultResponses::GeneratePartitionsResponse(
-          partitions_count);
+      ReadDefaultResponses::GeneratePartitionsResponse(partitions_count);
   const auto request =
       read::PrefetchPartitionsRequest().WithPartitionIds(partitions);
   {
-    SCOPED_TRACE("Lookup fails");
-    SetupApiResponse(
-        http::NetworkResponse().WithStatus(http::HttpStatusCode::BAD_REQUEST),
-        "error");
-
-    auto future = client.PrefetchPartitions(request).GetFuture();
-    ASSERT_NE(future.wait_for(std::chrono::seconds(kTimeout)),
-              std::future_status::timeout);
-
-    auto response = future.get();
-    ASSERT_FALSE(response.IsSuccessful());
-  }
-  {
     SCOPED_TRACE("Get version fails");
-    SetupApiResponse(
-        http::NetworkResponse().WithStatus(http::HttpStatusCode::OK),
-        api_response_);
-    SetupVersionResponse(
-        http::NetworkResponse().WithStatus(http::HttpStatusCode::BAD_REQUEST));
+
+    ExpectVersionRequest(
+        http::NetworkResponse().WithStatus(HttpStatusCode::BAD_REQUEST));
 
     auto future = client.PrefetchPartitions(request).GetFuture();
     ASSERT_NE(future.wait_for(std::chrono::seconds(kTimeout)),
@@ -212,11 +138,10 @@ TEST_F(VersionedLayerClientPrefetchPartitionsTest, PrefetchPartitionsFails) {
   }
   {
     SCOPED_TRACE("Query partitions fails");
-    SetupVersionResponse(
-        http::NetworkResponse().WithStatus(http::HttpStatusCode::OK));
-    SetupQueryPartitionsResponse(
-        http::NetworkResponse().WithStatus(http::HttpStatusCode::BAD_REQUEST),
-        partitions, partitions_response);
+    ExpectVersionRequest();
+    ExpectQueryPartitionsRequest(
+        partitions, partitions_response,
+        http::NetworkResponse().WithStatus(HttpStatusCode::BAD_REQUEST));
 
     auto future = client.PrefetchPartitions(request).GetFuture();
     ASSERT_NE(future.wait_for(std::chrono::seconds(kTimeout)),
@@ -227,13 +152,11 @@ TEST_F(VersionedLayerClientPrefetchPartitionsTest, PrefetchPartitionsFails) {
   }
   {
     SCOPED_TRACE("Get data fails");
-    SetupQueryPartitionsResponse(
-        http::NetworkResponse().WithStatus(http::HttpStatusCode::OK),
-        partitions, partitions_response);
+    ExpectQueryPartitionsRequest(partitions, partitions_response);
     for (const auto& partition : partitions_response.GetPartitions()) {
-      SetupPertitionResponse(
-          http::NetworkResponse().WithStatus(http::HttpStatusCode::BAD_REQUEST),
-          partition.GetDataHandle(), "data");
+      ExpectBlobRequest(
+          partition.GetDataHandle(), "data",
+          http::NetworkResponse().WithStatus(HttpStatusCode::BAD_REQUEST));
     }
 
     auto future = client.PrefetchPartitions(request).GetFuture();
@@ -245,18 +168,16 @@ TEST_F(VersionedLayerClientPrefetchPartitionsTest, PrefetchPartitionsFails) {
   }
 }
 
-TEST_F(VersionedLayerClientPrefetchPartitionsTest, PrefetchPartitionsCancel) {
+TEST_F(VersionedLayerPrefetchPartitionsTest, PrefetchPartitionsCancel) {
   auto partitions_count = 1u;
   auto client =
       read::VersionedLayerClient(kCatalogHrn, layer_, boost::none, settings_);
   auto partitions = GeneratePartitionIds(partitions_count);
   auto partitions_response =
-      mockserver::ReadDefaultResponses::GeneratePartitionsResponse(
-          partitions_count);
+      ReadDefaultResponses::GeneratePartitionsResponse(partitions_count);
   const auto request =
       read::PrefetchPartitionsRequest().WithPartitionIds(partitions);
 
-  SCOPED_TRACE("Cancel request");
   std::promise<void> block_promise;
   auto block_future = block_promise.get_future();
   settings_.task_scheduler->ScheduleTask(
@@ -277,7 +198,7 @@ TEST_F(VersionedLayerClientPrefetchPartitionsTest, PrefetchPartitionsCancel) {
             client::ErrorCode::Cancelled);
 }
 
-TEST_F(VersionedLayerClientPrefetchPartitionsTest, CheckPriority) {
+TEST_F(VersionedLayerPrefetchPartitionsTest, CheckPriority) {
   auto priority = 300u;
   // this priority should be less than priority, but greater than LOW
   auto finish_task_priority = 200u;
@@ -286,23 +207,15 @@ TEST_F(VersionedLayerClientPrefetchPartitionsTest, CheckPriority) {
       read::VersionedLayerClient(kCatalogHrn, layer_, boost::none, settings_);
   auto partitions = GeneratePartitionIds(partitions_count);
   auto partitions_response =
-      mockserver::ReadDefaultResponses::GeneratePartitionsResponse(
-          partitions_count);
+      ReadDefaultResponses::GeneratePartitionsResponse(partitions_count);
   const auto request = read::PrefetchPartitionsRequest()
                            .WithPartitionIds(partitions)
                            .WithPriority(priority);
 
-  SetupApiResponse(http::NetworkResponse().WithStatus(http::HttpStatusCode::OK),
-                   api_response_);
-  SetupVersionResponse(
-      http::NetworkResponse().WithStatus(http::HttpStatusCode::OK));
-  SetupQueryPartitionsResponse(
-      http::NetworkResponse().WithStatus(http::HttpStatusCode::OK), partitions,
-      partitions_response);
+  ExpectVersionRequest();
+  ExpectQueryPartitionsRequest(partitions, partitions_response);
   for (const auto& partition : partitions_response.GetPartitions()) {
-    SetupPertitionResponse(
-        http::NetworkResponse().WithStatus(http::HttpStatusCode::OK),
-        partition.GetDataHandle(), "data");
+    ExpectBlobRequest(partition.GetDataHandle(), "data");
   }
 
   auto scheduler = settings_.task_scheduler;
@@ -340,7 +253,7 @@ TEST_F(VersionedLayerClientPrefetchPartitionsTest, CheckPriority) {
   }
 }
 
-TEST_F(VersionedLayerClientPrefetchPartitionsTest, PrefetchProgress) {
+TEST_F(VersionedLayerPrefetchPartitionsTest, PrefetchProgress) {
   auto partitions_count = 201u;  // 3 query
   auto client =
       read::VersionedLayerClient(kCatalogHrn, layer_, version_, settings_);
@@ -351,29 +264,22 @@ TEST_F(VersionedLayerClientPrefetchPartitionsTest, PrefetchProgress) {
   auto size3 = 1;
 
   auto partitions_response1 =
-      mockserver::ReadDefaultResponses::GeneratePartitionsResponse(size1);
+      ReadDefaultResponses::GeneratePartitionsResponse(size1);
   auto partitions_response2 =
-      mockserver::ReadDefaultResponses::GeneratePartitionsResponse(size2,
-                                                                   size1);
+      ReadDefaultResponses::GeneratePartitionsResponse(size2, size1);
   auto partitions_response3 =
-      mockserver::ReadDefaultResponses::GeneratePartitionsResponse(
-          size3, size1 + size2);
+      ReadDefaultResponses::GeneratePartitionsResponse(size3, size1 + size2);
   const auto request =
       read::PrefetchPartitionsRequest().WithPartitionIds(partitions);
 
-  SetupApiResponse(http::NetworkResponse().WithStatus(http::HttpStatusCode::OK),
-                   api_response_);
-  SetupQueryPartitionsResponse(
-      http::NetworkResponse().WithStatus(http::HttpStatusCode::OK),
+  ExpectQueryPartitionsRequest(
       std::vector<std::string>(partitions.begin(), partitions.begin() + size1),
       partitions_response1);
-  SetupQueryPartitionsResponse(
-      http::NetworkResponse().WithStatus(http::HttpStatusCode::OK),
+  ExpectQueryPartitionsRequest(
       std::vector<std::string>(partitions.begin() + size1,
                                partitions.begin() + size1 + size2),
       partitions_response2);
-  SetupQueryPartitionsResponse(
-      http::NetworkResponse().WithStatus(http::HttpStatusCode::OK),
+  ExpectQueryPartitionsRequest(
       std::vector<std::string>(partitions.begin() + size1 + size2,
                                partitions.begin() + size1 + size2 + size3),
       partitions_response3);
@@ -381,11 +287,11 @@ TEST_F(VersionedLayerClientPrefetchPartitionsTest, PrefetchProgress) {
   auto mock_partitions_response =
       [&](const read::model::Partitions& partitions) {
         for (const auto& partition : partitions.GetPartitions()) {
-          SetupPertitionResponse(http::NetworkResponse()
-                                     .WithStatus(http::HttpStatusCode::OK)
-                                     .WithBytesDownloaded(4)
-                                     .WithBytesUploaded(1),
-                                 partition.GetDataHandle(), "data");
+          ExpectBlobRequest(partition.GetDataHandle(), "data",
+                            http::NetworkResponse()
+                                .WithStatus(HttpStatusCode::OK)
+                                .WithBytesDownloaded(4)
+                                .WithBytesUploaded(1));
         }
       };
   mock_partitions_response(partitions_response1);
@@ -397,9 +303,7 @@ TEST_F(VersionedLayerClientPrefetchPartitionsTest, PrefetchProgress) {
   };
 
   Status status_object;
-
   size_t bytes_transferred{0};
-
   {
     auto matches = [](uint32_t prefetched, uint32_t total) {
       return [=](read::PrefetchPartitionsStatus status) -> bool {
